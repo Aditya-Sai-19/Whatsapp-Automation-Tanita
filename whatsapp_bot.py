@@ -258,18 +258,24 @@ class WhatsAppBot:
 
         candidates = [
             page.locator("span[data-icon='attach-document']"),
+            page.locator("[data-testid='attach-document']"),
+            page.locator("[data-testid*='attach-document']"),
+            page.get_by_role("button", name=re.compile(r"document", re.IGNORECASE)),
+            page.get_by_role("menuitem", name=re.compile(r"document", re.IGNORECASE)),
             page.locator("div[role='button']:has-text('Document')"),
             page.locator("li[role='button']:has-text('Document')"),
             page.locator("div[role='button'][aria-label*='Document']"),
             page.locator("div[role='button'][title*='Document']"),
             page.locator("button[aria-label*='Document']"),
             page.locator("button[title*='Document']"),
+            page.locator("div[role='button']:has-text('document')"),
+            page.locator("li[role='button']:has-text('document')"),
         ]
 
         last_err: Optional[Exception] = None
         for loc in candidates:
             try:
-                loc.first.wait_for(state="visible", timeout=3_000)
+                loc.first.wait_for(state="visible", timeout=10_000)
                 loc.first.click()
                 return
             except (TimeoutError, Error) as e:
@@ -277,23 +283,56 @@ class WhatsAppBot:
 
         raise RuntimeError("Could not find Document attachment option on WhatsApp Web") from last_err
 
+    def _dump_debug_artifacts(self, *, prefix: str) -> None:
+        page = self.page
+        ts = int(time.time())
+        out_dir = self.profile_dir / "debug"
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return
+
+        try:
+            (out_dir / f"{prefix}_{ts}.txt").write_text(
+                f"url={page.url}\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+        try:
+            (out_dir / f"{prefix}_{ts}.html").write_text(page.content(), encoding="utf-8")
+        except Exception:
+            pass
+
+        try:
+            page.screenshot(path=str(out_dir / f"{prefix}_{ts}.png"), full_page=True)
+        except Exception:
+            pass
+
     def _get_document_option_locator(self):
         page = self.page
 
         candidates = [
             page.locator("span[data-icon='attach-document']"),
+            page.locator("[data-testid='attach-document']"),
+            page.locator("[data-testid*='attach-document']"),
+            page.get_by_role("button", name=re.compile(r"document", re.IGNORECASE)),
+            page.get_by_role("menuitem", name=re.compile(r"document", re.IGNORECASE)),
             page.locator("div[role='button']:has-text('Document')"),
             page.locator("li[role='button']:has-text('Document')"),
             page.locator("div[role='button'][aria-label*='Document']"),
             page.locator("div[role='button'][title*='Document']"),
             page.locator("button[aria-label*='Document']"),
             page.locator("button[title*='Document']"),
+            page.locator("div[role='button']:has-text('document')"),
+            page.locator("li[role='button']:has-text('document')"),
         ]
 
         last_err: Optional[Exception] = None
         for loc in candidates:
             try:
-                loc.first.wait_for(state="visible", timeout=3_000)
+                loc.first.wait_for(state="visible", timeout=10_000)
                 return loc.first
             except (TimeoutError, Error) as e:
                 last_err = e
@@ -306,41 +345,58 @@ class WhatsAppBot:
         self._focus_message_box()
         self._click_attachment_button()
 
-        doc_option = self._get_document_option_locator()
-
-        try:
-            with page.expect_file_chooser(timeout=3_000) as chooser_info:
-                doc_option.click()
-            chooser = chooser_info.value
-            chooser.set_files(str(pdf_path))
-        except TimeoutError:
+        def try_set_file_on_any_input(timeout_ms: int) -> bool:
             file_inputs = page.locator("input[type='file']")
             try:
-                file_inputs.first.wait_for(state="attached", timeout=3_000)
-            except TimeoutError as e:
-                raise WhatsAppSendError("Document attachment input did not appear") from e
+                file_inputs.first.wait_for(state="attached", timeout=timeout_ms)
+            except TimeoutError:
+                return False
 
-            found_candidate = False
             last_err: Optional[Exception] = None
             for i in range(file_inputs.count()):
                 inp = file_inputs.nth(i)
                 accept = (inp.get_attribute("accept") or "").lower()
                 if "image" in accept or "video" in accept:
                     continue
-
-                found_candidate = True
                 try:
                     inp.set_input_files(str(pdf_path))
-                    last_err = None
-                    break
+                    return True
                 except Error as e:
                     last_err = e
 
-            if not found_candidate:
-                raise WhatsAppSendError("Document attachment input did not appear")
             if last_err is not None:
                 raise WhatsAppSendError("Failed to set PDF file into the attachment input") from last_err
+            return False
+
+        try:
+            if not try_set_file_on_any_input(2_000):
+                doc_option = None
+                last_err: Optional[Exception] = None
+                for _ in range(2):
+                    try:
+                        doc_option = self._get_document_option_locator()
+                        break
+                    except RuntimeError as e:
+                        last_err = e
+                        time.sleep(0.5)
+                        self._click_attachment_button()
+
+                if doc_option is None:
+                    raise RuntimeError("Could not find Document attachment option on WhatsApp Web") from last_err
+
+                with page.expect_file_chooser(timeout=10_000) as chooser_info:
+                    doc_option.click()
+                chooser = chooser_info.value
+                chooser.set_files(str(pdf_path))
+        except RuntimeError as e:
+            self._dump_debug_artifacts(prefix="attach_ui_missing")
+            raise WhatsAppSendError("Could not find Document attachment option on WhatsApp Web") from e
+        except TimeoutError as e:
+            self._dump_debug_artifacts(prefix="attach_timeout")
+            if not try_set_file_on_any_input(10_000):
+                raise WhatsAppSendError("Document attachment input did not appear") from e
         except Error as e:
+            self._dump_debug_artifacts(prefix="attach_error")
             raise WhatsAppSendError("Failed to set PDF file into the attachment input") from e
 
         send_button = page.locator(
