@@ -49,7 +49,7 @@ pip install -r requirements.txt
 
 5. Install Playwright components:
 
-```
+```pip install -r requirements.txt
 python -m playwright install
 ```
 
