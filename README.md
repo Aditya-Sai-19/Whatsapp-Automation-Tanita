@@ -87,6 +87,16 @@ Examples:
 
 ## Run
 
+Double-click `run.bat` from the project folder.
+
+If you prefer running from a terminal:
+
+```
+run.bat
+```
+
+(Advanced / developer run)
+
 ```
 python app.py
 ```
@@ -99,6 +109,14 @@ python app.py
   - WhatsApp on phone → Linked devices → Link a device
 - The login session is saved inside `browser_profile/`.
 - Next runs should not require scanning again (unless you log out).
+
+## Prerequisites (client machine)
+
+- **Google Chrome** installed (the app launches Chrome using Playwright).
+- **Python 3** installed.
+- One-time setup must be completed at least once on the machine (virtual environment + dependencies + Playwright install).
+
+If `run.bat` prints a warning about a missing virtual environment, ask the installer/technical person to run the **Setup (Windows)** steps above.
 
 ## Notes / limitations
 
