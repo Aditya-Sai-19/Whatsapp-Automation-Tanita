@@ -38,13 +38,16 @@ class WhatsAppBot:
         profile_dir: Path,
         *,
         headless: bool = False,
-        min_delay_seconds: int = 6,
-        max_delay_seconds: int = 10,
+        min_delay_seconds: int = 20,
+        max_delay_seconds: int = 45,
     ):
         self.profile_dir = profile_dir
         self.headless = headless
         self.min_delay_seconds = min_delay_seconds
         self.max_delay_seconds = max_delay_seconds
+
+        self._batch_success_count = 0
+        self._batch_pause_after_successes = random.randint(10, 15)
 
         self._playwright = None
         self._context: Optional[BrowserContext] = None
@@ -113,7 +116,7 @@ class WhatsAppBot:
                 if page.locator("[data-testid='qrcode'], canvas[aria-label*='Scan'], canvas[aria-label*='QR']").count() > 0:
                     if log:
                         log("Waiting for QR login (scan once; session is saved)…")
-                    time.sleep(2)
+                    time.sleep(random.uniform(1.7, 2.6))
                     continue
 
                 ready = page.locator(
@@ -128,7 +131,26 @@ class WhatsAppBot:
             except Error:
                 pass
 
-            time.sleep(1)
+            time.sleep(random.uniform(0.8, 1.4))
+
+    def _sleep_random(self, min_seconds: float, max_seconds: float) -> None:
+        time.sleep(random.uniform(min_seconds, max_seconds))
+
+    def _maybe_batch_throttle(self, *, log: Optional[LogFn]) -> None:
+        # Stability/anti-bot pacing: after a human-like batch of successful sends, take a longer break.
+        # This intentionally slows long runs to reduce automation flagging / silent throttling risk.
+        if self._batch_success_count < self._batch_pause_after_successes:
+            return
+
+        pause_seconds = random.uniform(120.0, 300.0)
+        if log:
+            log(
+                f"Batch throttle: {self._batch_success_count} successful sends reached; pausing {pause_seconds/60.0:.1f} min…"
+            )
+        time.sleep(pause_seconds)
+
+        self._batch_success_count = 0
+        self._batch_pause_after_successes = random.randint(10, 15)
 
     def _random_delay(self) -> float:
         return random.uniform(float(self.min_delay_seconds), float(self.max_delay_seconds))
@@ -165,10 +187,14 @@ class WhatsAppBot:
 
         self._attach_and_send_document(pdf_path=pdf_path, log=log)
 
+        self._batch_success_count += 1
+
         delay = self._random_delay()
         if log:
             log(f"Sent. Waiting {delay:.1f}s before next client…")
         time.sleep(delay)
+
+        self._maybe_batch_throttle(log=log)
 
         return SendResult(phone_digits=phone_digits, pdf_path=pdf_path, success=True)
 
@@ -343,6 +369,9 @@ class WhatsAppBot:
         page = self.page
 
         self._focus_message_box()
+
+        # Anti-bot micro-delay: a brief human-like hesitation before clicking Attach.
+        self._sleep_random(0.8, 2.0)
         self._click_attachment_button()
 
         def try_set_file_on_any_input(timeout_ms: int) -> bool:
@@ -351,6 +380,10 @@ class WhatsAppBot:
                 file_inputs.first.wait_for(state="attached", timeout=timeout_ms)
             except TimeoutError:
                 return False
+
+            # Anti-bot micro-delay: allow the attachment menu to "settle" like a real user
+            # (applied only after UI readiness is confirmed).
+            self._sleep_random(1.0, 2.5)
 
             last_err: Optional[Exception] = None
             for i in range(file_inputs.count()):
@@ -378,13 +411,15 @@ class WhatsAppBot:
                         break
                     except RuntimeError as e:
                         last_err = e
-                        time.sleep(0.5)
+                        self._sleep_random(0.4, 0.9)
                         self._click_attachment_button()
 
                 if doc_option is None:
                     raise RuntimeError("Could not find Document attachment option on WhatsApp Web") from last_err
 
                 with page.expect_file_chooser(timeout=10_000) as chooser_info:
+                    # Anti-bot micro-delay: attachment menu is visible; hesitate before choosing Document.
+                    self._sleep_random(1.0, 2.5)
                     doc_option.click()
                 chooser = chooser_info.value
                 chooser.set_files(str(pdf_path))
@@ -404,6 +439,9 @@ class WhatsAppBot:
         )
         try:
             send_button.first.wait_for(state="visible", timeout=60_000)
+
+            # Anti-bot micro-delay: after the preview is ready, pause before clicking Send.
+            self._sleep_random(2.0, 5.0)
             send_button.first.click()
         except TimeoutError as e:
             raise WhatsAppSendError("Send button did not appear for the document preview") from e
