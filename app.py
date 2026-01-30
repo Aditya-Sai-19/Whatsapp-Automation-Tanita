@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import queue
+import random
 import threading
+import time
 import traceback
 from pathlib import Path
 import tkinter as tk
@@ -142,21 +144,101 @@ class App(tk.Tk):
                 total = len(clients)
                 self._ui_queue.put(("progress_init", total))
 
-                for i, c in enumerate(clients, start=1):
-                    self._ui_queue.put(("progress", (i - 1, total, f"{i}/{total} Preparing {c.client_name}")))
+                daily_success_sends = 0
+                daily_max_sends = 60
+                sessions_completed = 0
+                max_sessions_per_day = 2
+                client_idx = 0
+                last_session_end_ts: float | None = None
 
-                    match = finder.find_pdf_for_client(c.client_name)
-                    qlog(f"Sending to {c.client_name} ({c.mobile_number_raw}) -> {match.pdf_path.name}")
+                # Session safety guards: split sending into at most 2 sessions/day.
+                while (
+                    client_idx < total
+                    and daily_success_sends < daily_max_sends
+                    and sessions_completed < max_sessions_per_day
+                ):
+                    sessions_completed += 1
 
-                    bot.send_pdf_to_phone(
-                        phone_digits=c.mobile_number_e164_digits,
-                        pdf_path=match.pdf_path,
-                        log=qlog,
+                    # Optional but recommended: avoid identical daily start patterns.
+                    session_start_jitter_seconds = random.uniform(30.0, 120.0)
+                    qlog(
+                        f"Session {sessions_completed}/{max_sessions_per_day} start jitter: "
+                        f"waiting {session_start_jitter_seconds:.1f}s…"
+                    )
+                    time.sleep(session_start_jitter_seconds)
+
+                    try:
+                        bot.reset_session_counters()
+                    except Exception:
+                        pass
+
+                    # Session cap: 25–30 PDFs/session (we use 30 max to allow reaching 60/day within 2 sessions).
+                    session_remaining_capacity = 30
+                    remaining_daily_capacity = daily_max_sends - daily_success_sends
+                    remaining_clients = total - client_idx
+                    session_target = min(session_remaining_capacity, remaining_daily_capacity, remaining_clients)
+
+                    qlog(
+                        f"Starting session {sessions_completed}/{max_sessions_per_day}: "
+                        f"planning up to {session_target} sends."
                     )
 
-                    self._ui_queue.put(("progress", (i, total, f"{i}/{total} Sent to {c.client_name}")))
+                    sent_this_session = 0
+                    while (
+                        sent_this_session < session_target
+                        and client_idx < total
+                        and daily_success_sends < daily_max_sends
+                    ):
+                        c = clients[client_idx]
+                        i = client_idx + 1
+                        self._ui_queue.put(("progress", (i - 1, total, f"{i}/{total} Preparing {c.client_name}")))
 
-                self._ui_queue.put(("done", "All PDFs sent."))
+                        match = finder.find_pdf_for_client(c.client_name)
+                        qlog(f"Sending to {c.client_name} ({c.mobile_number_raw}) -> {match.pdf_path.name}")
+
+                        bot.send_pdf_to_phone(
+                            phone_digits=c.mobile_number_e164_digits,
+                            pdf_path=match.pdf_path,
+                            log=qlog,
+                        )
+
+                        daily_success_sends += 1
+                        sent_this_session += 1
+                        client_idx += 1
+
+                        self._ui_queue.put(("progress", (i, total, f"{i}/{total} Sent to {c.client_name}")))
+
+                        if daily_success_sends >= daily_max_sends:
+                            qlog("Daily safe limit (60 PDFs) reached. Stopping automation.")
+                            break
+
+                    if daily_success_sends >= daily_max_sends:
+                        break
+
+                    if client_idx >= total:
+                        break
+
+                    if sessions_completed >= max_sessions_per_day:
+                        qlog("Daily session limit (2 sessions) reached. Stopping automation.")
+                        break
+
+                    # Inter-session break: mandatory long pause between sessions.
+                    inter_session_break_seconds = random.uniform(2.0 * 3600.0, 3.0 * 3600.0)
+                    last_session_end_ts = time.time()
+                    next_session_earliest_ts = last_session_end_ts + inter_session_break_seconds
+                    qlog(
+                        f"Inter-session break: pausing {inter_session_break_seconds/3600.0:.2f} hours "
+                        f"before next session…"
+                    )
+                    qlog(f"Next session not before: {time.ctime(next_session_earliest_ts)}")
+                    time.sleep(inter_session_break_seconds)
+
+                if daily_success_sends >= daily_max_sends:
+                    self._ui_queue.put(("done", "Daily safe limit (60 PDFs) reached. Stopping automation."))
+                elif sessions_completed >= max_sessions_per_day and client_idx < total:
+                    self._ui_queue.put(("done", "Daily session limit reached. Stopping automation."))
+                else:
+                    self._ui_queue.put(("done", "All PDFs sent."))
 
             finally:
                 bot.close()

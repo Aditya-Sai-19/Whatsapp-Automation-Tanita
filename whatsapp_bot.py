@@ -38,8 +38,8 @@ class WhatsAppBot:
         profile_dir: Path,
         *,
         headless: bool = False,
-        min_delay_seconds: int = 20,
-        max_delay_seconds: int = 45,
+        min_delay_seconds: int = 35,
+        max_delay_seconds: int = 70,
     ):
         self.profile_dir = profile_dir
         self.headless = headless
@@ -47,7 +47,9 @@ class WhatsAppBot:
         self.max_delay_seconds = max_delay_seconds
 
         self._batch_success_count = 0
-        self._batch_pause_after_successes = random.randint(10, 15)
+        self._batch_pause_after_successes = random.randint(8, 12)
+
+        self._session_success_count = 0
 
         self._playwright = None
         self._context: Optional[BrowserContext] = None
@@ -96,6 +98,9 @@ class WhatsAppBot:
             raise RuntimeError("WhatsAppBot is not started")
         return self._page
 
+    def reset_session_counters(self) -> None:
+        self._session_success_count = 0
+
     def _ensure_whatsapp_loaded(self, log: Optional[LogFn]) -> None:
         page = self.page
         if log:
@@ -142,7 +147,8 @@ class WhatsAppBot:
         if self._batch_success_count < self._batch_pause_after_successes:
             return
 
-        pause_seconds = random.uniform(120.0, 300.0)
+        # Anti-bot batch cooldown
+        pause_seconds = random.uniform(240.0, 420.0)
         if log:
             log(
                 f"Batch throttle: {self._batch_success_count} successful sends reached; pausing {pause_seconds/60.0:.1f} min…"
@@ -150,10 +156,23 @@ class WhatsAppBot:
         time.sleep(pause_seconds)
 
         self._batch_success_count = 0
-        self._batch_pause_after_successes = random.randint(10, 15)
+        self._batch_pause_after_successes = random.randint(8, 12)
+
+    def _maybe_long_cooldown(self, *, log: Optional[LogFn]) -> None:
+        if self._session_success_count < 25:
+            return
+
+        pause_seconds = random.uniform(90.0 * 60.0, 120.0 * 60.0)
+        if log:
+            log(
+                f"Long safety cooldown: pausing for {pause_seconds/60.0:.1f} minutes after 25 sends"
+            )
+        time.sleep(pause_seconds)
+
+        self._session_success_count = 0
 
     def _random_delay(self) -> float:
-        return random.uniform(float(self.min_delay_seconds), float(self.max_delay_seconds))
+        return random.uniform(35.0, 70.0)
 
     def send_pdf_to_phone(
         self,
@@ -188,6 +207,7 @@ class WhatsAppBot:
         self._attach_and_send_document(pdf_path=pdf_path, log=log)
 
         self._batch_success_count += 1
+        self._session_success_count += 1
 
         delay = self._random_delay()
         if log:
@@ -195,6 +215,7 @@ class WhatsAppBot:
         time.sleep(delay)
 
         self._maybe_batch_throttle(log=log)
+        self._maybe_long_cooldown(log=log)
 
         return SendResult(phone_digits=phone_digits, pdf_path=pdf_path, success=True)
 
