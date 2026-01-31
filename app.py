@@ -240,9 +240,16 @@ class App(tk.Tk):
                         i = client_idx + 1
                         self._ui_queue.put(("progress", (i - 1, total, f"{i}/{total} Preparing {c.client_name}")))
 
-                        # Find and validate PDF for this client
-                        match = finder.find_pdf_for_client(c.client_name)
-                        qlog(f"Sending to {c.client_name} ({c.mobile_number_raw}) -> {match.pdf_path.name}")
+                        # Find PDF for this client; if missing, log warning and continue safely
+                        try:
+                            match = finder.find_pdf_for_client(c.client_name)
+                            qlog(f"Sending to {c.client_name} ({c.mobile_number_raw}) -> {match.pdf_path.name}")
+                        except PdfNotFoundError as e:
+                            qlog(f"Warning: PDF not found for {c.client_name}; skipping. ({e})")
+                            # Do not modify Sent; move to next client
+                            client_idx += 1
+                            self._ui_queue.put(("progress", (i, total, f"{i}/{total} Skipped {c.client_name} (no PDF)")))
+                            continue
 
                         try:
                             bot.send_pdf_to_phone(
