@@ -233,6 +233,10 @@ class App(tk.Tk):
                         and daily_success_sends < daily_max_sends
                     ):
                         c = clients[client_idx]
+                        # Safety: do not resend PDFs to rows already marked Sent = Yes
+                        if str(c.sent).strip().lower() == "yes":
+                            client_idx += 1
+                            continue
                         i = client_idx + 1
                         self._ui_queue.put(("progress", (i - 1, total, f"{i}/{total} Preparing {c.client_name}")))
 
