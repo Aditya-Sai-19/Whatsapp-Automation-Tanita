@@ -9,7 +9,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from csv_loader import InvalidPhoneNumberError as CsvInvalidPhoneNumberError, load_clients_csv
+from csv_loader import InvalidPhoneNumberError as CsvInvalidPhoneNumberError, load_clients_csv, ClientRecord, save_clients_csv
 from pdf_finder import PdfAmbiguousMatchError, PdfFinder, PdfNotFoundError
 from whatsapp_bot import (
     InvalidPhoneNumberError as BotInvalidPhoneNumberError,
@@ -56,6 +56,9 @@ class App(tk.Tk):
 
         self.start_btn = ttk.Button(controls, text="Start Sending", command=self._on_start)
         self.start_btn.pack(side=tk.LEFT)
+
+        self.resume_btn = ttk.Button(controls, text="Resume", command=self._on_resume)
+        self.resume_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         self.progress_label = ttk.Label(controls, text="Idle")
         self.progress_label.pack(side=tk.LEFT, padx=(12, 0))
@@ -126,6 +129,33 @@ class App(tk.Tk):
         )
         self._worker_thread.start()
 
+    def _on_resume(self) -> None:
+        # Resume uses the same runner; the CSV state is read fresh on each start.
+        if self._worker_thread and self._worker_thread.is_alive():
+            messagebox.showwarning("Busy", "A run is already in progress.")
+            return
+
+        csv_path = Path(self.csv_path_var.get()).expanduser()
+        reports_dir = Path(self.reports_dir_var.get()).expanduser()
+        profile_dir = Path(self.profile_dir_var.get()).expanduser()
+
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", tk.END)
+        self.log_text.configure(state="disabled")
+
+        self.progress["value"] = 0
+        self.progress["maximum"] = 1
+        self.progress_label.configure(text="Resuming…")
+
+        self._set_running(True)
+
+        self._worker_thread = threading.Thread(
+            target=self._run_job,
+            args=(csv_path, reports_dir, profile_dir),
+            daemon=True,
+        )
+        self._worker_thread.start()
+
     def _run_job(self, csv_path: Path, reports_dir: Path, profile_dir: Path) -> None:
         def qlog(s: str) -> None:
             self._ui_queue.put(("log", s))
@@ -144,11 +174,24 @@ class App(tk.Tk):
                 total = len(clients)
                 self._ui_queue.put(("progress_init", total))
 
+                # Determine first unsent row to enable resume-on-failure safely.
+                try:
+                    first_unsent = next(
+                        (idx for idx, c in enumerate(clients) if str(c.sent).strip().lower() != "yes"),
+                        None,
+                    )
+                    if first_unsent is None:
+                        # All rows already sent
+                        self._ui_queue.put(("done", "All PDFs already sent."))
+                        return
+                except Exception:
+                    first_unsent = 0
+                client_idx = first_unsent
+
                 daily_success_sends = 0
                 daily_max_sends = 60
                 sessions_completed = 0
                 max_sessions_per_day = 2
-                client_idx = 0
                 last_session_end_ts: float | None = None
 
                 # Session safety guards: split sending into at most 2 sessions/day.
@@ -193,14 +236,29 @@ class App(tk.Tk):
                         i = client_idx + 1
                         self._ui_queue.put(("progress", (i - 1, total, f"{i}/{total} Preparing {c.client_name}")))
 
+                        # Find and validate PDF for this client
                         match = finder.find_pdf_for_client(c.client_name)
                         qlog(f"Sending to {c.client_name} ({c.mobile_number_raw}) -> {match.pdf_path.name}")
 
-                        bot.send_pdf_to_phone(
-                            phone_digits=c.mobile_number_e164_digits,
-                            pdf_path=match.pdf_path,
-                            log=qlog,
+                        try:
+                            bot.send_pdf_to_phone(
+                                phone_digits=c.mobile_number_e164_digits,
+                                pdf_path=match.pdf_path,
+                                log=qlog,
+                            )
+                        except Exception as e:
+                            # Any failure here should stop execution safely and preserve Sent flags
+                            self._ui_queue.put(("error", str(e)))
+                            return
+
+                        # Mark as sent and persist progress
+                        clients[client_idx] = ClientRecord(
+                            client_name=c.client_name,
+                            mobile_number_raw=c.mobile_number_raw,
+                            mobile_number_e164_digits=c.mobile_number_e164_digits,
+                            sent="Yes",
                         )
+                        save_clients_csv(csv_path, clients)
 
                         daily_success_sends += 1
                         sent_this_session += 1
